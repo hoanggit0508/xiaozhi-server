@@ -156,7 +156,7 @@ def get_local_ip() -> str:
 
 LOCAL_IP = get_local_ip()
 ACTIVE_SESSION = None
-LAST_ROBOT_IP = "192.168.102.142"
+LAST_ROBOT_IP = None
 recognizer = sr.Recognizer()
 VOICE_CACHE: Dict[str, List[bytes]] = {}
 PREAMP_GAIN = float(CONFIG.get("tts", {}).get("gain_boost", 2.4))
@@ -217,12 +217,40 @@ def _http_post_sync(url: str, payload_dict: dict, timeout: float = 3.5):
 
 async def send_robot_hardware_action(action: str, duration_ms: int = 0, speed: int = 85):
     """
-    Điều khiển trực tiếp mạch cầu H và động cơ bánh xe qua REST API (Cổng 80) của xe
-    Độ trễ phản hồi tức thì 0ms.
-    KHÔNG AUTO DỪNG: Xe thực hiện hành động liên tục cho đến khi người dùng ra lệnh Dừng lại!
+    Điều khiển trực tiếp mạch cầu H và động cơ bánh xe:
+    1. Ưu tiên gửi trực tiếp qua luồng kết nối WebSocket bảo mật của Robot (hỗ trợ cả Render Cloud 24/7).
+    2. Nếu đang chạy mạng LAN nội bộ thì gửi bổ trợ qua REST API cổng 80 của xe.
     """
-    global LAST_ROBOT_IP
+    global ACTIVE_SESSION, LAST_ROBOT_IP
+
+    # 1. Ưu tiên gửi lệnh trực tiếp qua WebSocket tới Robot
+    if ACTIVE_SESSION is not None:
+        try:
+            mcp_tool_map = {
+                "forward": ("self.motor.move_forward", {"speed_percent": speed, "duration_ms": 30000}),
+                "backward": ("self.motor.move_backward", {"speed_percent": speed, "duration_ms": 30000}),
+                "left": ("self.motor.turn_left", {"speed_percent": speed, "duration_ms": 1000}),
+                "right": ("self.motor.turn_right", {"speed_percent": speed, "duration_ms": 1000}),
+                "stop": ("self.motor.stop", {}),
+                "dance": ("self.motor.victory_dance", {}),
+                "victory": ("self.motor.victory_dance", {}),
+                "victory_dance": ("self.motor.victory_dance", {}),
+                "sway": ("self.motor.sway_dance", {}),
+                "sway_dance": ("self.motor.sway_dance", {}),
+                "patrol": ("self.motor.patrol", {}),
+                "wake_up": ("self.motor.wake_up", {}),
+            }
+            if action in mcp_tool_map:
+                tool, args = mcp_tool_map[action]
+                await ACTIVE_SESSION.execute_mcp_tool(tool, args)
+                logger.info(f"🏎️ [MCP WebSocket 0ms] Đã gửi lệnh '{action}' trực tiếp tới xe qua WebSocket!")
+                return
+        except Exception as e:
+            logger.warning(f"Lỗi gửi lệnh qua WebSocket: {e}")
+
+    # 2. Nếu không có kết nối WebSocket và không có IP xe thật
     if not LAST_ROBOT_IP:
+        logger.warning("⚠️ Xe Robot chưa kết nối vào Server. Vui lòng bật nguồn xe robot và kết nối Wifi!")
         return
 
     url_control = f"http://{LAST_ROBOT_IP}/api/control"
