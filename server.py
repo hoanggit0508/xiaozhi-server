@@ -157,6 +157,7 @@ def get_local_ip() -> str:
 LOCAL_IP = get_local_ip()
 ACTIVE_SESSION = None
 LAST_ROBOT_IP = None
+MCP_COUNTER = 1000
 recognizer = sr.Recognizer()
 VOICE_CACHE: Dict[str, List[bytes]] = {}
 PREAMP_GAIN = float(CONFIG.get("tts", {}).get("gain_boost", 2.4))
@@ -563,7 +564,12 @@ def extract_youtube_audio_info(query: str):
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
-        'extract_flat': False
+        'extract_flat': False,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios']
+            }
+        }
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(search_q, download=False)
@@ -722,8 +728,10 @@ class XiaozhiSession:
             await self.ws.send_str(json.dumps(data))
 
     async def execute_mcp_tool(self, tool_name: str, args: Dict[str, Any]):
-        """Gửi lệnh MCP điều khiển phần cứng tới robot"""
-        mcp_id = int(time.time() * 1000) % 1000000
+        """Gửi lệnh MCP điều khiển phần cứng tới robot với ID duy nhất"""
+        global MCP_COUNTER
+        MCP_COUNTER += 1
+        mcp_id = MCP_COUNTER
         logger.info(f"🛠️ [MCP Tool Call #{mcp_id}] {tool_name} -> {args}")
         await self.send_json({
             "type": "mcp",
@@ -759,10 +767,7 @@ class XiaozhiSession:
             self.is_speaking = False
             return
 
-        # 1. Đặt âm lượng loa lên 100%
-        await self.execute_mcp_tool("self.audio_speaker.set_volume", {"volume": 100})
-
-        # 2. Báo bắt đầu phát âm thanh và hiển thị phụ đề lên màn hình OLED
+        # Báo bắt đầu phát âm thanh và hiển thị phụ đề lên màn hình OLED
         await self.send_json({
             "type": "tts",
             "state": "start",
@@ -925,10 +930,20 @@ class XiaozhiSession:
                 args = cmd.get("args", {})
                 if tool in movement_map:
                     act, spd = movement_map[tool]
-                    asyncio.create_task(send_robot_hardware_action(act, 0, spd))
-                    if act == "stop":
+                    mcp_args = dict(args)
+                    if tool in ["self.motor.move_forward", "self.motor.move_backward"]:
+                        if "speed_percent" not in mcp_args:
+                            mcp_args["speed_percent"] = spd
+                        if "duration_ms" not in mcp_args:
+                            mcp_args["duration_ms"] = 10000
+                        await self.execute_mcp_tool(tool, mcp_args)
+                    elif tool in ["self.motor.turn_left", "self.motor.turn_right", "self.motor.spin_around", "self.motor.dance", "self.motor.happy", "self.motor.sad", "self.motor.wake_up"]:
+                        await self.execute_mcp_tool(tool, {})
+                    elif act == "stop":
                         await self.execute_mcp_tool("self.motor.stop", {})
                         self.stop_music()
+                    else:
+                        await self.execute_mcp_tool(tool, mcp_args)
                 elif tool == "self.motor.turn_angle":
                     angle = args.get("angle_degrees", 90)
                     if angle == -45:

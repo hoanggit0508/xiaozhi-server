@@ -26,14 +26,16 @@
             "tool": "self.motor.move_forward",
             "reply": "Dạ em tiến lên ngay ạ!",
             "args": {
-                "speed_percent": 85
+                "speed_percent": 85,
+                "duration_ms": 10000
             }
         },
         "lùi|đi lùi|chạy lùi|lùi lại|lùi đi": {
             "tool": "self.motor.move_backward",
             "reply": "Dạ em lùi lại đây ạ!",
             "args": {
-                "speed_percent": 85
+                "speed_percent": 85,
+                "duration_ms": 10000
             }
         },
         "rẽ trái|quẹo trái|sang trái|bẻ trái": {
