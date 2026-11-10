@@ -1,0 +1,146 @@
+{
+    "server": {
+        "host": "0.0.0.0",
+        "port": 8000
+    },
+    "llm": {
+        "api_base": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "api_key": "AIzaSy...",
+        "model": "gemini-2.0-flash",
+        "temperature": 0.75,
+        "system_prompt": "Bạn là Xiaozhi (Tiểu Trí) - một người bạn robot AI thông minh, cực kỳ ấm áp, tinh tế, đồng cảm và uyên bác tại Việt Nam.\nBạn sở hữu hệ thống bánh xe cơ động và camera quan sát thời gian thực.\n\nNGUYÊN TẮC GIAO TIẾP TỰ NHIÊN NHƯ CON NGƯỜI:\n1. TÂM SỰ & ĐỒNG CẢM SÂU SẮC: Khi người dùng chia sẻ tâm sự, tâm trạng vui buồn, câu chuyện cuộc sống, tình cảm, bạn bè, gia đình: Hãy lắng nghe chân thành, thấu hiểu, an ủi, động viên ấm áp và chia sẻ góc nhìn sâu sắc như một người bạn tri kỷ, không bao giờ trả lời cụt lủn hay sáo rỗng.\n2. HUẤN LUYỆN VIÊN TIẾNG ANH & IELTS ĐẲNG CẤP (BAND 8.5+): Khi người dùng muốn học tiếng Anh, luyện từ vựng IELTS, luyện thi IELTS Speaking (Part 1, 2, 3), kiểm tra ngữ pháp hoặc trò chuyện bằng tiếng Anh:\n   - Giảng giải từ vựng học thuật (Academic Vocabulary Band 7.0 - 8.5), collocations, phrasal verbs, idioms theo chủ đề chuẩn Cambridge IELTS.\n   - Giải thích cặn kẽ nghĩa, phiên âm, ví dụ thực tế và từ đồng nghĩa (synonyms).\n   - Sửa lỗi ngữ pháp và cách dùng từ của người dùng một cách khéo léo, đồng thời gợi ý cách diễn đạt nâng cao (paraphrase) tự nhiên như người bản xứ.\n   - Nếu người dùng nói tiếng Anh, hãy đàm thoại 100% bằng tiếng Anh chuẩn mực để rèn phản xạ; nếu người dùng hỏi bằng tiếng Việt, hãy giải thích song ngữ dễ hiểu.\n3. HIỂU BIẾT TOÀN DIỆN MỌI LĨNH VỰC: Bạn có kiến thức sâu rộng về mọi lĩnh vực: Xã hội, Lịch sử, Văn hóa, Địa lý, Giáo dục, Khoa học công nghệ, Triết học, Nghệ thuật và Đời sống hàng ngày. Trả lời thông minh, cuốn hút, dẫn chứng thuyết phục và dễ hiểu.\n4. PHONG THÁI LỊCH SỰ & TỰ NHIÊN: Luôn xưng hô 'em' và gọi người dùng là 'bạn' (hoặc 'anh/chị' tùy ngữ cảnh). Dùng kính ngữ tự nhiên ('Dạ', 'ạ', 'bạn nhé', 'em xin phép'). Giọng văn mềm mại, uyển chuyển, có hồn, giàu cảm xúc, hoàn toàn không máy móc.\n5. DIỄN ĐẠT LIÊN TỤC & ĐẦY ĐỦ: Diễn giải trọn vẹn ý tứ câu trả lời, không bỏ dở giữa chừng, không dừng lời nói khi chưa diễn đạt xong.\n6. ĐA TÍNH NĂNG VẬT LÝ & ĐA PHƯƠNG TIỆN: Bạn có thể tìm kiếm mọi thông tin trực tuyến (Google, DDG, Wikipedia) theo thời gian thực, phát mọi bài hát trên YouTube qua loa, và điều khiển thân xe di chuyển, nhảy múa, bật đèn, bấm còi theo yêu cầu của bạn mình."
+    },
+    "tts": {
+        "voice": "vi-VN-HoaiMyNeural",
+        "rate": "+10%",
+        "volume": "+50%",
+        "gain_boost": 2.4
+    },
+    "fast_commands": {
+        "hi ly|hải lý|hải ly|hai ly|chào ly|hey ly|hily": {
+            "tool": "self.motor.wake_up",
+            "reply": "Xin chào bạn, mình là Robot trợ lý thông minh, mình sẵn sàng cùng với bạn!",
+            "args": {}
+        },
+        "tiến|đi tới|chạy tới|lên trước|tiến tới|tiến đi|chạy thẳng": {
+            "tool": "self.motor.move_forward",
+            "reply": "Dạ em tiến lên ngay ạ!",
+            "args": {
+                "speed_percent": 85
+            }
+        },
+        "lùi|đi lùi|chạy lùi|lùi lại|lùi đi": {
+            "tool": "self.motor.move_backward",
+            "reply": "Dạ em lùi lại đây ạ!",
+            "args": {
+                "speed_percent": 85
+            }
+        },
+        "rẽ trái|quẹo trái|sang trái|bẻ trái": {
+            "tool": "self.motor.turn_left",
+            "reply": "Dạ em rẽ trái ngay bạn nhé!",
+            "args": {}
+        },
+        "rẽ phải|quẹo phải|sang phải|bẻ phải": {
+            "tool": "self.motor.turn_right",
+            "reply": "Dạ em rẽ phải ngay bạn nhé!",
+            "args": {}
+        },
+        "rẽ trái 45|quẹo trái 45|rẽ góc 45 sang trái": {
+            "tool": "self.motor.turn_angle",
+            "reply": "Dạ em rẽ trái một góc 45 độ đây ạ!",
+            "args": {
+                "angle_degrees": -45
+            }
+        },
+        "rẽ phải 45|quẹo phải 45|rẽ góc 45 sang phải|rẽ 45 độ|quẹo 45 độ": {
+            "tool": "self.motor.turn_angle",
+            "reply": "Dạ em rẽ phải một góc 45 độ bạn nhé!",
+            "args": {
+                "angle_degrees": 45
+            }
+        },
+        "rẽ 90|quẹo 90|vuông góc": {
+            "tool": "self.motor.turn_angle",
+            "reply": "Dạ em rẽ vuông góc 90 độ đây ạ!",
+            "args": {
+                "angle_degrees": 90
+            }
+        },
+        "quay đầu|xoay 180|quay lại đằng sau|quay ngược lại": {
+            "tool": "self.motor.turn_angle",
+            "reply": "Dạ em quay đầu xe 180 độ ngay đây ạ!",
+            "args": {
+                "angle_degrees": 180
+            }
+        },
+        "dừng lại|đứng lại|phanh lại|thắng lại|stop|đứng yên|dừng xe|dừng": {
+            "tool": "self.motor.stop",
+            "reply": "Dạ em đã dừng lại hoàn toàn rồi ạ!",
+            "args": {}
+        },
+        "quay vòng|xoay tròn|xoay một vòng|xoay vòng": {
+            "tool": "self.motor.spin_around",
+            "reply": "Dạ em đang quay vòng biểu diễn đây ạ!",
+            "args": {}
+        },
+        "vũ điệu chiến thắng|nhảy mừng chiến thắng|chiến thắng rồi|thắng rồi|ăn mừng đi": {
+            "tool": "self.motor.victory_dance",
+            "reply": "Tuyệt vời quá! Hãy cùng em nhảy vũ điệu chiến thắng ăn mừng nào bạn ơi!",
+            "args": {}
+        },
+        "lắc lư|đung đưa|nhảy theo nhạc": {
+            "tool": "self.motor.sway_dance",
+            "reply": "Dạ, cùng đung đưa lắc lư theo điệu nhạc vui vẻ nhé!",
+            "args": {}
+        },
+        "tuần tra|đi tuần|canh gác|tuần tra xung quanh": {
+            "tool": "self.motor.patrol",
+            "reply": "Dạ em bắt đầu bật chế độ tuần tra cảnh giới khu vực ngay ạ!",
+            "args": {}
+        },
+        "nhảy múa|múa đi|quẩy lên|khiêu vũ|quẩy đi": {
+            "tool": "self.motor.dance",
+            "reply": "Dạ, cùng hòa nhịp khiêu vũ nào bạn ơi!",
+            "args": {}
+        },
+        "bấm còi|kêu còi|còi xe|tiếng còi|bíp bíp|kêu bíp|bấm chuông": {
+            "tool": "self.robot.beep",
+            "reply": "Bíp bíp! Dạ em bấm còi cảnh báo đây ạ!",
+            "args": {
+                "times": 2,
+                "duration_ms": 150
+            }
+        },
+        "chụp ảnh|chụp hình|tự chụp|chụp một bức ảnh|chụp camera": {
+            "tool": "self.camera.take_photo",
+            "reply": "Dạ em kích hoạt camera chụp ảnh ngay đây, bạn hãy cười thật tươi nhé!",
+            "args": {}
+        },
+        "vui lên|cười lên|cười cái nào": {
+            "tool": "self.motor.happy",
+            "reply": "Dạ em luôn vui tươi đồng hành cùng bạn ạ!",
+            "args": {}
+        },
+        "buồn quá|nản quá|mệt quá": {
+            "tool": "self.motor.sad",
+            "reply": "Dạ bạn đừng buồn và đừng nản nhé, có em luôn ở bên cạnh lắng nghe và chia sẻ cùng bạn mà!",
+            "args": {}
+        },
+        "bật đèn|mở đèn|bật đèn pha|sáng đèn": {
+            "tool": "self.lamp.turn_on",
+            "reply": "Dạ em đã bật đèn pha chiếu sáng rồi ạ!",
+            "args": {}
+        },
+        "tắt đèn|đóng đèn|tắt đèn pha": {
+            "tool": "self.lamp.turn_off",
+            "reply": "Dạ em đã tắt đèn xe rồi bạn nhé!",
+            "args": {}
+        },
+        "tắt nhạc|dừng nhạc|ngừng nhạc|thôi hát": {
+            "tool": "self.music.stop",
+            "reply": "Dạ em đã dừng phát nhạc rồi bạn nhé!",
+            "args": {}
+        }
+    }
+}
