@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     gcc \
     build-essential \
+    && ldconfig \
     && rm -rf /var/lib/apt/lists/*
 
 # Cài đặt dependencies Python

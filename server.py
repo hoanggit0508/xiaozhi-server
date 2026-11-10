@@ -23,9 +23,9 @@ import edge_tts
 from gtts import gTTS
 import miniaudio
 from openai import AsyncOpenAI
-from pyogg import opus
 import speech_recognition as sr
 import yt_dlp
+import ctypes.util
 
 # ==================== 1. QUẢN LÝ NHẬT KÝ (LOGS) ====================
 LOG_BUFFER = collections.deque(maxlen=250)
@@ -41,6 +41,98 @@ class WebLogHandler(logging.Handler):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("XiaozhiServer")
 logger.addHandler(WebLogHandler())
+
+# ==================== TRÌNH ĐIỀU KHIỂN BỘ MÃ HÓA / GIẢI MÃ OPUS (TỰ ĐỘNG TƯƠNG THÍCH MỌI NỀN TẢNG) ====================
+class OpusModule:
+    OPUS_APPLICATION_VOIP = 2048
+    OPUS_APPLICATION_AUDIO = 2049
+    opus_int16 = ctypes.c_int16
+
+    def __init__(self):
+        self._lib = self._load_lib()
+        if not self._lib:
+            raise RuntimeError("Không tìm thấy thư viện chia sẻ libopus trên hệ điều hành này!")
+
+        self._lib.opus_encoder_create.restype = ctypes.c_void_p
+        self._lib.opus_encoder_create.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+
+        self._lib.opus_encode.restype = ctypes.c_int
+        self._lib.opus_encode.argtypes = [ctypes.c_void_p, ctypes.POINTER(self.opus_int16), ctypes.c_int, ctypes.POINTER(ctypes.c_ubyte), ctypes.c_int32]
+
+        self._lib.opus_encoder_destroy.restype = None
+        self._lib.opus_encoder_destroy.argtypes = [ctypes.c_void_p]
+
+        self._lib.opus_decoder_create.restype = ctypes.c_void_p
+        self._lib.opus_decoder_create.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+
+        self._lib.opus_decode.restype = ctypes.c_int
+        self._lib.opus_decode.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ubyte), ctypes.c_int32, ctypes.POINTER(self.opus_int16), ctypes.c_int, ctypes.c_int]
+
+        self._lib.opus_decoder_destroy.restype = None
+        self._lib.opus_decoder_destroy.argtypes = [ctypes.c_void_p]
+
+        self.opus_encoder_create = self._lib.opus_encoder_create
+        self.opus_encode = self._lib.opus_encode
+        self.opus_encoder_destroy = self._lib.opus_encoder_destroy
+        self.opus_decoder_create = self._lib.opus_decoder_create
+        self.opus_decode = self._lib.opus_decode
+        self.opus_decoder_destroy = self._lib.opus_decoder_destroy
+
+    def _load_lib(self):
+        # 1. Thử pyogg nếu thư viện pyogg đã nạp sẵn được dll
+        try:
+            from pyogg import opus as pyogg_opus
+            if hasattr(pyogg_opus, "opus_encoder_create") and hasattr(pyogg_opus, "opus_encode"):
+                return pyogg_opus
+        except Exception:
+            pass
+
+        # 2. Quét tất cả các đường dẫn thư viện Opus trên Linux (Debian, Ubuntu, Alpine), macOS và Windows
+        candidates = [
+            "opus",
+            "libopus.so.0",
+            "libopus.so",
+            "/usr/lib/x86_64-linux-gnu/libopus.so.0",
+            "/usr/lib/x86_64-linux-gnu/libopus.so",
+            "/usr/lib/aarch64-linux-gnu/libopus.so.0",
+            "/usr/lib/libopus.so.0",
+            "/usr/lib/libopus.so",
+            "/usr/lib64/libopus.so.0",
+            "/usr/local/lib/libopus.so",
+            "/usr/local/lib/libopus.so.0",
+            "libopus-0.dll",
+            "opus.dll"
+        ]
+
+        # Kiểm tra thêm trong thư mục cài đặt pyogg nếu có
+        try:
+            import pyogg
+            p_dir = os.path.dirname(pyogg.__file__)
+            for f in os.listdir(p_dir):
+                if "opus" in f.lower() and f.endswith((".dll", ".so", ".dylib")):
+                    candidates.insert(0, os.path.join(p_dir, f))
+        except Exception:
+            pass
+
+        for cand in candidates:
+            try:
+                p = ctypes.util.find_library(cand) or cand
+                lib = ctypes.CDLL(p)
+                if hasattr(lib, "opus_encoder_create"):
+                    logger.info(f"✅ Đã kết nối thư viện libopus thành công từ: {cand}")
+                    return lib
+            except Exception:
+                continue
+        return None
+
+try:
+    opus = OpusModule()
+except Exception as e:
+    logger.error(f"❌ Cảnh báo khởi tạo Opus: {e}")
+    try:
+        from pyogg import opus
+    except Exception:
+        opus = None
 
 # ==================== 2. ĐỌC FILE CẤU HÌNH & KHỞI TẠO ====================
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
