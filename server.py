@@ -622,30 +622,186 @@ async def answer_user_query_online(query: str, history: List[dict]) -> str:
 
     return f"Dạ em hiểu ý bạn rồi ạ! Em luôn ở đây lắng nghe và đồng hành cùng bạn. Bạn muốn tâm sự hoặc hỏi thêm điều gì về {query} nữa không ạ?"
 
-# ==================== 7. PHÁT NHẠC TRỰC TUYẾN TẤT CẢ BÀI TỪ YOUTUBE ====================
-def extract_youtube_audio_info(query: str):
-    """Tìm kiếm bài hát bất kỳ trên YouTube và lấy đường dẫn luồng âm thanh trực tiếp"""
-    search_q = query.strip()
-    if not search_q.startswith("http"):
-        search_q = f"ytsearch1:{search_q}"
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': False,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios']
-            }
-        }
+# ==================== 7. PHÁT NHẠC TRỰC TUYẾN ĐA NGUỒN (YOUTUBE + SOUNDCLOUD FALLBACK) ====================
+_MUSIC_YDL_BASE_OPTS = {
+    'format': 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
+    'noplaylist': True,
+    'quiet': True,
+    'no_warnings': True,
+    'extract_flat': False,
+    'socket_timeout': 10,
+}
+
+def _build_pyav_http_options(http_headers: Optional[dict]) -> dict:
+    """Chuyển HTTP headers từ yt-dlp sang options cho FFmpeg/PyAV để tránh lỗi HTTP 403."""
+    av_opts = {
+        'reconnect': '1',
+        'reconnect_streamed': '1',
+        'reconnect_delay_max': '5',
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(search_q, download=False)
-        entry = info['entries'][0] if 'entries' in info and len(info['entries']) > 0 else info
-        title = entry.get('title', query)
-        stream_url = entry.get('url', None)
-        return title, stream_url
+    if not http_headers:
+        return av_opts
+    extra_lines = []
+    for key, val in http_headers.items():
+        if not val:
+            continue
+        if key.lower() == 'user-agent':
+            av_opts['user_agent'] = str(val)
+        else:
+            extra_lines.append(f"{key}: {val}\r\n")
+    if extra_lines:
+        av_opts['headers'] = "".join(extra_lines)
+    return av_opts
+
+def _open_verified_audio_stream(stream_url: str, http_headers: Optional[dict] = None):
+    """Mở luồng âm thanh qua PyAV kèm headers và kiểm tra giải mã được frame đầu tiên."""
+    container = av.open(stream_url, options=_build_pyav_http_options(http_headers), timeout=15.0)
+    try:
+        audio_stream = next((s for s in container.streams if s.type == 'audio'), None)
+        if audio_stream is None:
+            raise ValueError("Không tìm thấy luồng âm thanh trong container")
+        decoder = container.decode(audio_stream)
+        first_frame = next(decoder, None)
+        if first_frame is None:
+            raise ValueError("Luồng âm thanh rỗng (0 frame)")
+        return container, audio_stream, first_frame, decoder
+    except Exception:
+        try:
+            container.close()
+        except Exception:
+            pass
+        raise
+
+def _iter_audio_frames(first_frame, decoder):
+    """Duyệt liên tiếp từ frame đã kiểm tra trước sang phần còn lại của luồng giải mã."""
+    if first_frame is not None:
+        yield first_frame
+    yield from decoder
+
+def _extract_yt_dlp_entries(target: str, youtube_clients: Optional[list] = None) -> list:
+    """Chạy yt-dlp lấy danh sách metadata + link trực tiếp mà không tải file về đĩa."""
+    opts = dict(_MUSIC_YDL_BASE_OPTS)
+    if youtube_clients:
+        opts['extractor_args'] = {'youtube': {'player_client': youtube_clients}}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(target, download=False)
+    if not info:
+        return []
+    entries = info.get('entries')
+    if entries is not None:
+        return [e for e in entries if e]
+    return [info]
+
+def _try_open_entry(entry: dict, source_label: str):
+    """Thử mở và xác thực phát thực tế một entry từ yt-dlp."""
+    stream_url = entry.get('url')
+    if not stream_url:
+        return None
+    title = entry.get('title') or "Bài hát"
+    try:
+        container, audio_stream, first_frame, decoder = _open_verified_audio_stream(
+            stream_url, entry.get('http_headers')
+        )
+        return title, container, audio_stream, first_frame, decoder, source_label
+    except Exception as e:
+        logger.warning(f"⚠️ [{source_label}] Không mở được luồng '{title}': {e}")
+        return None
+
+def _prioritize_soundcloud_entries(entries: list) -> list:
+    """Ưu tiên bản nhạc đầy đủ (>= 60 giây) trước các đoạn preview ngắn 30 giây."""
+    full_tracks = [e for e in entries if (e.get('duration') or 0) >= 60]
+    short_tracks = [e for e in entries if 0 < (e.get('duration') or 0) < 60]
+    unknown_tracks = [e for e in entries if not e.get('duration')]
+    return full_tracks + short_tracks + unknown_tracks
+
+def extract_and_open_music_stream(query: str):
+    """
+    Tìm kiếm bài hát và mở sẵn luồng PyAV đã kiểm tra hoạt động (tránh 403 trên máy chủ cloud).
+    Thứ tự ưu tiên:
+      1. YouTube (client android_sdkless -> mediaconnect -> ios_music kèm HTTP headers chuẩn)
+      2. SoundCloud (scsearch5 — hoạt động ổn định trên IP datacenter khi YouTube chặn 403)
+    Trả về: (title, container, audio_stream, first_frame, decoder, source_name) hoặc None.
+    """
+    search_q = (query or "").strip()
+    if not search_q:
+        return None
+
+    # Trường hợp người dùng đưa link trực tiếp
+    if search_q.startswith(("http://", "https://")):
+        for clients, label in [(['android_sdkless', 'mediaconnect'], "Direct-YT"), (None, "Direct-URL")]:
+            try:
+                for entry in _extract_yt_dlp_entries(search_q, youtube_clients=clients):
+                    opened = _try_open_entry(entry, label)
+                    if opened:
+                        return opened
+            except Exception as e:
+                logger.warning(f"⚠️ [{label}] Lỗi trích xuất URL '{search_q}': {e}")
+        try:
+            container, audio_stream, first_frame, decoder = _open_verified_audio_stream(search_q)
+            return search_q, container, audio_stream, first_frame, decoder, "Raw-HTTP"
+        except Exception as e:
+            logger.warning(f"⚠️ [Raw-HTTP] Không mở được '{search_q}': {e}")
+            return None
+
+    # Bước 1: Thử tìm và mở trên YouTube với client ít bị chặn 403 nhất
+    yt_entries = []
+    try:
+        yt_entries = _extract_yt_dlp_entries(f"ytsearch1:{search_q}", youtube_clients=['android_sdkless'])
+    except Exception as e:
+        logger.warning(f"⚠️ [YouTube Search] Không thể tìm '{search_q}' (chuyển sang SoundCloud): {e}")
+
+    if yt_entries:
+        first_entry = yt_entries[0]
+        opened = _try_open_entry(first_entry, "YouTube (android_sdkless)")
+        if opened:
+            return opened
+
+        # Nếu tìm được link video nhưng CDN từ chối 403, thử lại đúng URL đó bằng client dự phòng
+        watch_url = first_entry.get('webpage_url')
+        if watch_url:
+            for alt_client in ('mediaconnect', 'ios_music'):
+                try:
+                    for alt_entry in _extract_yt_dlp_entries(watch_url, youtube_clients=[alt_client]):
+                        opened = _try_open_entry(alt_entry, f"YouTube ({alt_client})")
+                        if opened:
+                            return opened
+                except Exception as e:
+                    logger.warning(f"⚠️ [YouTube ({alt_client})] Lỗi trích xuất '{watch_url}': {e}")
+
+    # Bước 2: Dự phòng tự động sang SoundCloud (ổn định cao trên Render / IP cloud datacenter)
+    try:
+        sc_entries = _extract_yt_dlp_entries(f"scsearch5:{search_q}")
+        for entry in _prioritize_soundcloud_entries(sc_entries):
+            opened = _try_open_entry(entry, "SoundCloud")
+            if opened:
+                return opened
+    except Exception as e:
+        logger.warning(f"⚠️ [SoundCloud] Lỗi tìm kiếm '{search_q}': {e}")
+
+    return None
+
+def extract_youtube_audio_info(query: str):
+    """Hàm tương thích ngược: lấy tiêu đề và URL âm thanh trực tiếp."""
+    search_q = (query or "").strip()
+    if not search_q:
+        return query, None
+    targets = [
+        (search_q if search_q.startswith("http") else f"ytsearch1:{search_q}", ['android_sdkless', 'mediaconnect']),
+        (None if search_q.startswith("http") else f"scsearch3:{search_q}", None),
+    ]
+    for target, clients in targets:
+        if not target:
+            continue
+        try:
+            entries = _extract_yt_dlp_entries(target, youtube_clients=clients)
+            if target.startswith("scsearch"):
+                entries = _prioritize_soundcloud_entries(entries)
+            for entry in entries:
+                if entry.get('url'):
+                    return entry.get('title', query), entry.get('url')
+        except Exception as e:
+            logger.warning(f"⚠️ Trích xuất {target} thất bại: {e}")
+    return query, None
 
 # ==================== 8. TẠO ÂM THANH OPUS 24kHz & PREAMP BOOST ====================
 def is_predominantly_english(text: str) -> bool:
@@ -907,23 +1063,46 @@ class XiaozhiSession:
         """
         self.stop_music()
 
-        intro_msg = f"Dạ, em đang mở bài {song_name} trên YouTube cho bạn đây ạ!"
+        intro_msg = f"Dạ, em đang mở bài {song_name} cho bạn đây ạ!"
+
+        def _close_container_safe(cont):
+            if cont is not None:
+                try:
+                    cont.close()
+                except Exception:
+                    pass
+
+        def _close_future_container(fut):
+            if not fut.cancelled():
+                try:
+                    res = fut.result()
+                    if res and len(res) > 1:
+                        _close_container_safe(res[1])
+                except Exception:
+                    pass
 
         async def _music_worker():
+            container = None
+            fetch_future = None
+            tts_stop_sent = False
             try:
-                logger.info(f"🎵 [YOUTUBE] Đang tìm kiếm và trích xuất luồng âm thanh cho: '{song_name}'")
+                logger.info(f"🎵 [MUSIC] Đang tìm kiếm và xác thực luồng âm thanh cho: '{song_name}'")
                 loop = asyncio.get_running_loop()
-                # Chạy song song: vừa nói câu giới thiệu vừa tìm link âm thanh YouTube để triệt tiêu độ trễ
-                fetch_future = loop.run_in_executor(None, extract_youtube_audio_info, song_name)
+                # Chạy song song: vừa nói câu giới thiệu vừa trích xuất & mở sẵn luồng phát để triệt tiêu độ trễ
+                fetch_future = loop.run_in_executor(None, extract_and_open_music_stream, song_name)
                 await self.send_tts_speech(intro_msg, stop_music=False)
 
-                title, stream_url = await fetch_future
+                result = await fetch_future
 
-                if not stream_url:
-                    await self.send_tts_speech("Dạ, em không tìm thấy bài hát này trên YouTube. Bạn thử tên bài khác nhé ạ!", stop_music=False)
+                if not result:
+                    await self.send_tts_speech(
+                        "Dạ, em chưa tìm được nguồn phát ổn định cho bài hát này. Bạn thử nói tên bài khác nhé ạ!",
+                        stop_music=False
+                    )
                     return
 
-                logger.info(f"🎶 [YOUTUBE PLAYING] Bắt đầu phát bài: '{title}'")
+                title, container, audio_stream, first_frame, decoder, source_name = result
+                logger.info(f"🎶 [MUSIC PLAYING | {source_name}] Bắt đầu phát bài: '{title}'")
 
                 # Báo cho ESP32 biết chuẩn bị phát nhạc
                 await self.execute_mcp_tool("self.audio_speaker.set_volume", {"volume": 100})
@@ -940,9 +1119,7 @@ class XiaozhiSession:
                 })
                 await asyncio.sleep(0.12)
 
-                # 2. Khởi tạo PyAV giải mã luồng và nén sang Opus 24kHz
-                container = av.open(stream_url)
-                audio_stream = next(s for s in container.streams if s.type == 'audio')
+                # Khởi tạo bộ resample & nén sang Opus 24kHz từ luồng PyAV đã mở sẵn
                 resampler = av.AudioResampler(format='s16', layout='mono', rate=24000)
 
                 err = ctypes.c_int()
@@ -954,7 +1131,7 @@ class XiaozhiSession:
                 pcm_buffer = bytearray()
 
                 try:
-                    for frame in container.decode(audio_stream):
+                    for frame in _iter_audio_frames(first_frame, decoder):
                         if self.ws.closed:
                             break
 
@@ -976,26 +1153,43 @@ class XiaozhiSession:
                                     await self.send_opus_packet(bytes(out_buf[:nbytes]))
                                     await asyncio.sleep(0.057)
 
-                finally:
-                    opus.opus_encoder_destroy(enc)
-                    container.close()
-                    await self.send_json({
-                        "type": "tts",
-                        "state": "stop",
-                        "session_id": self.session_id
-                    })
                     logger.info(f"🏁 Đã kết thúc phát bài hát: {title}")
+                finally:
+                    if enc:
+                        opus.opus_encoder_destroy(enc)
+                    _close_container_safe(container)
+                    container = None
+                    if not tts_stop_sent:
+                        tts_stop_sent = True
+                        await self.send_json({
+                            "type": "tts",
+                            "state": "stop",
+                            "session_id": self.session_id
+                        })
 
             except asyncio.CancelledError:
-                await self.send_json({
-                    "type": "tts",
-                    "state": "stop",
-                    "session_id": self.session_id
-                })
+                if fetch_future and not fetch_future.done():
+                    fetch_future.add_done_callback(_close_future_container)
+                _close_container_safe(container)
+                self.is_speaking = False
+                if not tts_stop_sent:
+                    tts_stop_sent = True
+                    try:
+                        await self.send_json({
+                            "type": "tts",
+                            "state": "stop",
+                            "session_id": self.session_id
+                        })
+                    except Exception:
+                        pass
                 logger.info(f"⏹️ Luồng phát bài '{song_name}' đã được dừng theo yêu cầu.")
             except Exception as e:
-                logger.error(f"Lỗi trong quá trình phát nhạc YouTube: {e}")
-                await self.send_tts_speech("Dạ, luồng phát nhạc gặp gián đoạn nhẹ. Bạn vui lòng chọn lại bài nhé ạ!", stop_music=False)
+                _close_container_safe(container)
+                logger.error(f"Lỗi trong quá trình phát nhạc: {e}")
+                await self.send_tts_speech(
+                    "Dạ, luồng phát nhạc gặp gián đoạn nhẹ. Bạn vui lòng chọn lại bài nhé ạ!",
+                    stop_music=False
+                )
 
         self.music_task = asyncio.create_task(_music_worker())
 
