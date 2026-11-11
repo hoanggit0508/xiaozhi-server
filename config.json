@@ -49,32 +49,24 @@
             "args": {}
         },
         "rẽ trái 45|quẹo trái 45|rẽ góc 45 sang trái": {
-            "tool": "self.motor.turn_angle",
-            "reply": "Dạ em rẽ trái một góc 45 độ đây ạ!",
-            "args": {
-                "angle_degrees": -45
-            }
+            "tool": "self.motor.turn_left",
+            "reply": "Dạ em rẽ trái ngay đây ạ!",
+            "args": {}
         },
         "rẽ phải 45|quẹo phải 45|rẽ góc 45 sang phải|rẽ 45 độ|quẹo 45 độ": {
-            "tool": "self.motor.turn_angle",
-            "reply": "Dạ em rẽ phải một góc 45 độ bạn nhé!",
-            "args": {
-                "angle_degrees": 45
-            }
+            "tool": "self.motor.turn_right",
+            "reply": "Dạ em rẽ phải ngay bạn nhé!",
+            "args": {}
         },
         "rẽ 90|quẹo 90|vuông góc": {
-            "tool": "self.motor.turn_angle",
-            "reply": "Dạ em rẽ vuông góc 90 độ đây ạ!",
-            "args": {
-                "angle_degrees": 90
-            }
+            "tool": "self.motor.turn_right",
+            "reply": "Dạ em rẽ ngay đây ạ!",
+            "args": {}
         },
         "quay đầu|xoay 180|quay lại đằng sau|quay ngược lại": {
-            "tool": "self.motor.turn_angle",
+            "tool": "self.motor.spin_around",
             "reply": "Dạ em quay đầu xe 180 độ ngay đây ạ!",
-            "args": {
-                "angle_degrees": 180
-            }
+            "args": {}
         },
         "dừng lại|đứng lại|phanh lại|thắng lại|stop|đứng yên|dừng xe|dừng": {
             "tool": "self.motor.stop",
@@ -87,18 +79,18 @@
             "args": {}
         },
         "vũ điệu chiến thắng|nhảy mừng chiến thắng|chiến thắng rồi|thắng rồi|ăn mừng đi": {
-            "tool": "self.motor.victory_dance",
-            "reply": "Tuyệt vời quá! Hãy cùng em nhảy vũ điệu chiến thắng ăn mừng nào bạn ơi!",
+            "tool": "self.motor.dance",
+            "reply": "Tuyệt vời quá! Hãy cùng em nhảy múa ăn mừng nào bạn ơi!",
             "args": {}
         },
         "lắc lư|đung đưa|nhảy theo nhạc": {
-            "tool": "self.motor.sway_dance",
+            "tool": "self.motor.dance",
             "reply": "Dạ, cùng đung đưa lắc lư theo điệu nhạc vui vẻ nhé!",
             "args": {}
         },
         "tuần tra|đi tuần|canh gác|tuần tra xung quanh": {
-            "tool": "self.motor.patrol",
-            "reply": "Dạ em bắt đầu bật chế độ tuần tra cảnh giới khu vực ngay ạ!",
+            "tool": "self.motor.dance",
+            "reply": "Dạ em bắt đầu biểu diễn tuần tra quanh khu vực ngay ạ!",
             "args": {}
         },
         "nhảy múa|múa đi|quẩy lên|khiêu vũ|quẩy đi": {
@@ -107,12 +99,9 @@
             "args": {}
         },
         "bấm còi|kêu còi|còi xe|tiếng còi|bíp bíp|kêu bíp|bấm chuông": {
-            "tool": "self.robot.beep",
-            "reply": "Bíp bíp! Dạ em bấm còi cảnh báo đây ạ!",
-            "args": {
-                "times": 2,
-                "duration_ms": 150
-            }
+            "tool": "self.motor.happy",
+            "reply": "Bíp bíp! Bíp bíp! Dạ em bấm còi cảnh báo xin đường đây ạ!",
+            "args": {}
         },
         "chụp ảnh|chụp hình|tự chụp|chụp một bức ảnh|chụp camera": {
             "tool": "self.camera.take_photo",
