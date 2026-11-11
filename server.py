@@ -5,9 +5,11 @@ import datetime
 import io
 import json
 import logging
+import math
 import os
 import re
 import socket
+import struct
 import time
 import urllib.request
 import urllib.parse
@@ -140,8 +142,8 @@ with open(CONFIG_FILE, "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
 
 openai_client = AsyncOpenAI(
-    base_url=CONFIG["llm"].get("api_base", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-    api_key=CONFIG["llm"].get("api_key", "sk-placeholder")
+    base_url=os.environ.get("LLM_API_BASE") or CONFIG["llm"].get("api_base", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+    api_key=os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or CONFIG["llm"].get("api_key", "sk-placeholder")
 )
 
 def get_local_ip() -> str:
@@ -184,19 +186,22 @@ def boost_pcm16_volume(pcm_data: bytes, gain: float = 2.4) -> bytes:
         return pcm_data
 
 def normalize_pcm16(pcm_data: bytes, target_peak: int = 24000) -> bytes:
-    """Tự động khuếch đại thông minh tín hiệu micro robot ESP32 giúp nghe rõ ngay cả khi nói nhỏ hoặc đứng xa"""
+    """Loại bỏ độ lệch DC và tự động khuếch đại tín hiệu micro robot ESP32 giúp nghe rõ ngay cả khi nói nhỏ hoặc đứng xa"""
     if not pcm_data:
         return b""
     try:
         samples = array.array('h', pcm_data)
-        if not samples:
+        n = len(samples)
+        if not n:
             return pcm_data
-        max_val = max(abs(s) for s in samples)
-        if max_val < 35:  # Chỉ bỏ qua khi là độ tĩnh hoàn toàn (silence)
+        mean = sum(samples) / n
+        centered = [s - mean for s in samples]
+        max_val = max(abs(x) for x in centered)
+        if max_val < 30:  # Chỉ bỏ qua khi là độ tĩnh hoàn toàn (silence)
             return pcm_data
-        gain = min(target_peak / max(max_val, 40), 16.0)
-        if gain > 1.15:
-            samples = array.array('h', [int(min(max(s * gain, -32767), 32767)) for s in samples])
+        gain = min(target_peak / max(max_val, 40.0), 16.0)
+        if gain > 1.15 or abs(mean) > 40:
+            samples = array.array('h', [int(min(max(x * gain, -32767), 32767)) for x in centered])
         return samples.tobytes()
     except Exception:
         return pcm_data
@@ -228,18 +233,27 @@ async def send_robot_hardware_action(action: str, duration_ms: int = 0, speed: i
     if ACTIVE_SESSION is not None:
         try:
             mcp_tool_map = {
-                "forward": ("self.motor.move_forward", {"speed_percent": speed, "duration_ms": 30000}),
-                "backward": ("self.motor.move_backward", {"speed_percent": speed, "duration_ms": 30000}),
-                "left": ("self.motor.turn_left", {"speed_percent": speed, "duration_ms": 1000}),
-                "right": ("self.motor.turn_right", {"speed_percent": speed, "duration_ms": 1000}),
+                "forward": ("self.motor.move_forward", {"speed_percent": speed, "duration_ms": 10000}),
+                "backward": ("self.motor.move_backward", {"speed_percent": speed, "duration_ms": 10000}),
+                "left": ("self.motor.turn_left", {}),
+                "right": ("self.motor.turn_right", {}),
+                "spin": ("self.motor.spin_around", {}),
+                "spin_around": ("self.motor.spin_around", {}),
                 "stop": ("self.motor.stop", {}),
-                "dance": ("self.motor.victory_dance", {}),
-                "victory": ("self.motor.victory_dance", {}),
-                "victory_dance": ("self.motor.victory_dance", {}),
-                "sway": ("self.motor.sway_dance", {}),
-                "sway_dance": ("self.motor.sway_dance", {}),
-                "patrol": ("self.motor.patrol", {}),
+                "dance": ("self.motor.dance", {}),
+                "victory": ("self.motor.dance", {}),
+                "victory_dance": ("self.motor.dance", {}),
+                "sway": ("self.motor.dance", {}),
+                "sway_dance": ("self.motor.dance", {}),
+                "patrol": ("self.motor.dance", {}),
+                "happy": ("self.motor.happy", {}),
+                "sad": ("self.motor.sad", {}),
                 "wake_up": ("self.motor.wake_up", {}),
+                "turn45_left": ("self.motor.turn_left", {}),
+                "turn45_right": ("self.motor.turn_right", {}),
+                "turn90_left": ("self.motor.turn_left", {}),
+                "turn90_right": ("self.motor.turn_right", {}),
+                "turn180": ("self.motor.spin_around", {}),
             }
             if action in mcp_tool_map:
                 tool, args = mcp_tool_map[action]
@@ -302,16 +316,26 @@ class OpusStreamDecoder:
         self.channels = channels
         err = ctypes.c_int()
         self.decoder = opus.opus_decoder_create(sample_rate, channels, ctypes.byref(err))
-        self.pcm_chunks = []
+        self.pre_roll = collections.deque(maxlen=6)
+        self.pcm_chunks: List[bytes] = []
         self.max_frame_samples = 5760
+        self.speech_started = False
+        self.speech_frame_count = 0
+        self.vad_trigger_count = 0
+        self.noise_floor = 110.0
+        self.speech_start_time = 0.0
+        self.last_voice_time = 0.0
 
-    def add_packet(self, data: bytes):
+    def add_packet(self, data: bytes) -> bool:
+        """Giải mã gói Opus và chạy bộ phát hiện giọng nói thông minh (Energy VAD).
+        Trả về True nếu vừa phát hiện bắt đầu giọng nói mới."""
         if not self.decoder or not data:
-            return
+            return False
+        just_started = False
         try:
             ubuf = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
             pbuf = ctypes.cast(ubuf, ctypes.POINTER(ctypes.c_ubyte))
-            out_buf = (opus.opus_int16 * self.max_frame_samples)()
+            out_buf = (opus.opus_int16 * (self.max_frame_samples * self.channels))()
             samples = opus.opus_decode(
                 self.decoder, 
                 pbuf, 
@@ -322,15 +346,54 @@ class OpusStreamDecoder:
             )
             if samples > 0:
                 raw_pcm = ctypes.string_at(out_buf, samples * 2 * self.channels)
-                self.pcm_chunks.append(raw_pcm)
+                pcm_arr = array.array('h', raw_pcm)
+                n = len(pcm_arr)
+                if n > 0:
+                    mean = sum(pcm_arr) / n
+                    rms = math.sqrt(sum((s - mean) * (s - mean) for s in pcm_arr) / n)
+                else:
+                    rms = 0.0
+
+                now = time.time()
+                start_thresh = max(175.0, min(self.noise_floor * 2.3, 850.0))
+                hold_thresh = max(130.0, min(self.noise_floor * 1.7, 600.0))
+
+                if not self.speech_started:
+                    self.pre_roll.append(raw_pcm)
+                    if rms >= start_thresh:
+                        self.vad_trigger_count += 1
+                        if self.vad_trigger_count >= 2 or rms >= start_thresh * 1.8:
+                            self.speech_started = True
+                            self.speech_start_time = now
+                            self.last_voice_time = now
+                            self.pcm_chunks = list(self.pre_roll)
+                            self.pre_roll.clear()
+                            self.speech_frame_count = self.vad_trigger_count
+                            just_started = True
+                    else:
+                        self.vad_trigger_count = 0
+                        # Cập nhật nền nhiễu phòng theo thời gian thực
+                        self.noise_floor = 0.92 * self.noise_floor + 0.08 * min(rms, 500.0)
+                else:
+                    self.pcm_chunks.append(raw_pcm)
+                    if rms >= hold_thresh:
+                        self.last_voice_time = now
+                        self.speech_frame_count += 1
         except Exception as e:
             logger.warning(f"Lỗi giải mã audio frame: {e}")
+        return just_started
 
     def reset(self):
+        self.pre_roll.clear()
         self.pcm_chunks.clear()
+        self.speech_started = False
+        self.speech_frame_count = 0
+        self.vad_trigger_count = 0
+        self.speech_start_time = 0.0
+        self.last_voice_time = 0.0
 
     def get_wav_data(self) -> bytes:
-        raw_pcm = b"".join(self.pcm_chunks)
+        raw_pcm = b"".join(self.pcm_chunks) if self.pcm_chunks else b"".join(self.pre_roll)
         if not raw_pcm:
             return b""
         raw_pcm = normalize_pcm16(raw_pcm)
@@ -363,7 +426,7 @@ def clean_repetitive_text(text: str) -> str:
 
 def transcribe_audio_pcm(wav_bytes: bytes, preferred_lang: str = "vi-VN") -> str:
     """Chuyển đổi âm thanh thu từ Micro Robot sang Tiếng Việt hoặc Tiếng Anh (hỗ trợ luyện IELTS song ngữ)"""
-    if not wav_bytes or len(wav_bytes) < 3000:
+    if not wav_bytes or len(wav_bytes) < 2500:
         return ""
     try:
         with io.BytesIO(wav_bytes) as audio_file:
@@ -375,6 +438,9 @@ def transcribe_audio_pcm(wav_bytes: bytes, preferred_lang: str = "vi-VN") -> str
                         return clean_repetitive_text(text)
                 except sr.UnknownValueError:
                     pass
+                except sr.RequestError as e:
+                    logger.warning(f"Lỗi kết nối dịch vụ Google STT ({preferred_lang}): {e}")
+                    return ""
                 
                 # Thử ngôn ngữ thay thế: nếu đang ở vi-VN thử en-US (phục vụ nói tiếng Anh/IELTS) và ngược lại
                 alt_lang = "en-US" if preferred_lang == "vi-VN" else "vi-VN"
@@ -382,6 +448,9 @@ def transcribe_audio_pcm(wav_bytes: bytes, preferred_lang: str = "vi-VN") -> str
                     text = recognizer.recognize_google(audio_data, language=alt_lang)
                     return clean_repetitive_text(text)
                 except sr.UnknownValueError:
+                    return ""
+                except sr.RequestError as e:
+                    logger.warning(f"Lỗi kết nối dịch vụ Google STT ({alt_lang}): {e}")
                     return ""
     except Exception as e:
         logger.warning(f"Lỗi nhận dạng tiếng nói: {e}")
@@ -682,44 +751,72 @@ class XiaozhiSession:
     def __init__(self, ws):
         self.ws = ws
         self.session_id = f"session-{uuid.uuid4().hex[:8]}"
+        self.protocol_version = 1
         self.audio_decoder = OpusStreamDecoder(sample_rate=16000, channels=1)
         self.conversation_history = [
             {"role": "system", "content": CONFIG["llm"]["system_prompt"]}
         ]
         self.preferred_lang = "vi-VN"
         self.is_listening = False
-        self.last_audio_time = 0
+        self.last_audio_time = 0.0
         self.music_task: Optional[asyncio.Task] = None
         self.is_speaking = False
+        self.is_processing = False
+        self.echo_suppression_logged = False
         self.last_speaking_end_time = 0.0
+        self._out_timestamp_ms = 0
         self.watcher_task = asyncio.create_task(self._silence_watcher())
 
+    async def send_opus_packet(self, frame: bytes):
+        """Gửi gói âm thanh Opus đúng theo version giao thức WebSocket của robot (v1, v2, v3)"""
+        if self.ws.closed or not frame:
+            return
+        if self.protocol_version == 2:
+            self._out_timestamp_ms = (self._out_timestamp_ms + 60) & 0xFFFFFFFF
+            pkt = struct.pack(">HHIII", 2, 0, 0, self._out_timestamp_ms, len(frame)) + frame
+        elif self.protocol_version == 3:
+            pkt = struct.pack(">BBH", 0, 0, len(frame)) + frame
+        else:
+            pkt = frame
+        await self.ws.send_bytes(pkt)
+
     async def _silence_watcher(self):
-        """Tự động phát hiện khi người dùng nói xong để xử lý lệnh ngay lập tức"""
+        """Tự động phát hiện khi người dùng nói xong (qua Energy VAD) để xử lý lệnh ngay lập tức"""
         try:
             while not self.ws.closed:
-                await asyncio.sleep(0.3)
-                if self.is_listening and self.last_audio_time > 0:
-                    silence_duration = time.time() - self.last_audio_time
-                    if silence_duration > 1.4 and len(self.audio_decoder.pcm_chunks) >= 5:
-                        self.is_listening = False
+                await asyncio.sleep(0.15)
+                if (
+                    self.is_listening
+                    and not self.is_processing
+                    and not self.is_speaking
+                    and self.audio_decoder.speech_started
+                ):
+                    now = time.time()
+                    silence_after_voice = now - self.audio_decoder.last_voice_time
+                    utt_duration = now - self.audio_decoder.speech_start_time
+                    has_enough_speech = self.audio_decoder.speech_frame_count >= 3
+
+                    if (silence_after_voice > 0.85 and has_enough_speech) or utt_duration > 14.0:
+                        logger.info("⏱️ [VAD Silence] Đã phát hiện người dùng nói xong -> Đang nhận diện giọng nói...")
                         wav_data = self.audio_decoder.get_wav_data()
                         self.audio_decoder.reset()
-
-                        # 1. TRIỆT TIÊU TIẾNG VỌNG LOA (Acoustic Echo Suppression)
-                        if self.is_speaking or (time.time() - self.last_speaking_end_time < 0.8):
-                            logger.info("🔇 [ECHO SUPPRESSION] Bỏ qua âm thanh micro thu được trong khi loa robot đang phát.")
+                        if not wav_data:
                             continue
 
-                        logger.info("⏱️ [VAD Silence] Đã phát hiện người dùng nói xong!")
-                        if wav_data:
+                        self.is_processing = True
+                        try:
                             loop = asyncio.get_running_loop()
-                            text = await loop.run_in_executor(None, transcribe_audio_pcm, wav_data, self.preferred_lang)
+                            text = await loop.run_in_executor(
+                                None, transcribe_audio_pcm, wav_data, self.preferred_lang
+                            )
                             if text:
                                 logger.info(f"🎤 [Micro Robot Nhận Diện]: '{text}'")
                                 await self.handle_user_query(text)
                             else:
-                                logger.info("🎙️ Chưa nhận diện rõ giọng nói từ micro.")
+                                logger.info("🎙️ [VAD] Có âm thanh từ micro nhưng Google STT chưa nghe rõ chữ (hãy nói to rõ hơn gần mic robot).")
+                        finally:
+                            self.audio_decoder.reset()
+                            self.is_processing = False
         except asyncio.CancelledError:
             pass
 
@@ -791,7 +888,7 @@ class XiaozhiSession:
         for frame in opus_frames:
             if self.ws.closed:
                 break
-            await self.ws.send_bytes(frame)
+            await self.send_opus_packet(frame)
             await asyncio.sleep(0.055)
 
         # 4. Báo kết thúc câu nói
@@ -876,7 +973,7 @@ class XiaozhiSession:
                                 p_out = ctypes.cast(out_buf, ctypes.POINTER(ctypes.c_ubyte))
                                 nbytes = opus.opus_encode(enc, p_in, frame_samples, p_out, 1275)
                                 if nbytes > 0:
-                                    await self.ws.send_bytes(bytes(out_buf[:nbytes]))
+                                    await self.send_opus_packet(bytes(out_buf[:nbytes]))
                                     await asyncio.sleep(0.057)
 
                 finally:
@@ -1128,7 +1225,13 @@ async def handle_websocket(request):
                     msg_type = data.get("type")
 
                     if msg_type == "hello":
-                        logger.info(f"👋 Robot gửi gói Hello. Client Version: {data.get('version')}")
+                        session.protocol_version = int(data.get("version", 1) or 1)
+                        audio_params = data.get("audio_params", {})
+                        sr_in = int(audio_params.get("sample_rate", 16000) or 16000)
+                        ch_in = int(audio_params.get("channels", 1) or 1)
+                        if sr_in != session.audio_decoder.sample_rate or ch_in != session.audio_decoder.channels:
+                            session.audio_decoder = OpusStreamDecoder(sample_rate=sr_in, channels=ch_in)
+                        logger.info(f"👋 Robot gửi gói Hello. Version: {session.protocol_version} | Audio: {audio_params}")
                         await session.send_json({
                             "type": "hello",
                             "transport": "websocket",
@@ -1150,21 +1253,47 @@ async def handle_websocket(request):
                         if state == "start":
                             session.is_listening = True
                             session.last_audio_time = time.time()
+                            session.echo_suppression_logged = False
                             session.audio_decoder.reset()
                         elif state == "stop":
                             session.is_listening = False
                             wav_data = session.audio_decoder.get_wav_data()
                             session.audio_decoder.reset()
-                            if wav_data:
-                                loop = asyncio.get_running_loop()
-                                recognized = await loop.run_in_executor(None, transcribe_audio_pcm, wav_data, session.preferred_lang)
-                                if recognized:
-                                    logger.info(f"🎤 [Micro Robot STT]: '{recognized}'")
-                                    await session.handle_user_query(recognized)
-                            elif text:
-                                await session.handle_user_query(text)
+                            if not session.is_processing:
+                                async def _process_stop(w_data=wav_data, txt=text):
+                                    session.is_processing = True
+                                    try:
+                                        if w_data:
+                                            loop = asyncio.get_running_loop()
+                                            recognized = await loop.run_in_executor(
+                                                None, transcribe_audio_pcm, w_data, session.preferred_lang
+                                            )
+                                            if recognized:
+                                                logger.info(f"🎤 [Micro Robot STT]: '{recognized}'")
+                                                await session.handle_user_query(recognized)
+                                                return
+                                        if txt:
+                                            await session.handle_user_query(txt)
+                                    finally:
+                                        session.audio_decoder.reset()
+                                        session.is_processing = False
+                                asyncio.create_task(_process_stop())
                         elif state == "detect" and text:
-                            await session.handle_user_query(text)
+                            t_low = text.lower().strip()
+                            wake_words_hw = ["你好小智", "小智", "nihao", "xiaozhi", "hi esp", "alexa", "hi ly", "hải lý"]
+                            if any(w in t_low for w in wake_words_hw):
+                                logger.info(f"✨ [WAKE WORD] Chip xe vừa nhận diện từ đánh thức: '{text}'")
+                                session.audio_decoder.reset()
+                                async def _wake_reply():
+                                    session.is_processing = True
+                                    try:
+                                        await session.send_tts_speech("Dạ, em nghe ạ!", stop_music=False)
+                                    finally:
+                                        session.audio_decoder.reset()
+                                        session.is_processing = False
+                                asyncio.create_task(_wake_reply())
+                            else:
+                                asyncio.create_task(session.handle_user_query(text))
 
                     elif msg_type == "mcp":
                         logger.info(f"📥 [MCP Response từ Robot]: {data.get('payload')}")
@@ -1177,16 +1306,40 @@ async def handle_websocket(request):
                     elif msg_type == "text":
                         user_text = data.get("text", "")
                         if user_text:
-                            await session.handle_user_query(user_text)
+                            asyncio.create_task(session.handle_user_query(user_text))
 
                 except json.JSONDecodeError:
                     pass
 
             elif msg.type == web.WSMsgType.BINARY:
-                # Gói âm thanh nhị phân từ micro robot
+                # 1. TRIỆT TIÊU TIẾNG VỌNG LOA ngay khi nhận gói (tránh làm nhiễu bộ đếm nói)
+                if session.is_speaking or (time.time() - session.last_speaking_end_time < 0.45):
+                    if not session.echo_suppression_logged:
+                        logger.info("🔇 [ECHO SUPPRESSION] Loa robot đang phát, tạm bỏ qua tiếng vọng micro.")
+                        session.echo_suppression_logged = True
+                    continue
+                session.echo_suppression_logged = False
+
+                if session.is_processing:
+                    continue
+
+                payload = msg.data
+                if session.protocol_version == 2 and len(payload) > 16:
+                    _ver, _mtype, _res, _ts, psize = struct.unpack(">HHIII", payload[:16])
+                    if _mtype != 0:
+                        continue
+                    payload = payload[16:16 + psize]
+                elif session.protocol_version == 3 and len(payload) > 4:
+                    _mtype, _res, psize = struct.unpack(">BBH", payload[:4])
+                    if _mtype != 0:
+                        continue
+                    payload = payload[4:4 + psize]
+
                 session.is_listening = True
                 session.last_audio_time = time.time()
-                session.audio_decoder.add_packet(msg.data)
+                just_started = session.audio_decoder.add_packet(payload)
+                if just_started:
+                    logger.info("🎙️ [VAD] Đang nghe thấy giọng nói từ Micro Robot...")
 
             elif msg.type == web.WSMsgType.ERROR:
                 logger.error(f"Lỗi WebSocket: {ws.exception()}")
@@ -1210,7 +1363,12 @@ async def handle_api_action(request):
 
         logger.info(f"🌐 [Lệnh từ Web/Micro]: '{command}'")
 
-        # Kiểm tra lệnh di chuyển phần cứng trực tiếp
+        # 1. Nếu robot đang kết nối WebSocket thời gian thực (hỗ trợ cả Render Cloud)
+        if ACTIVE_SESSION is not None:
+            await ACTIVE_SESSION.handle_user_query(command)
+            return web.json_response({"status": "ok", "message": f"Đã gửi lệnh tới robot qua WebSocket: {command}"})
+
+        # 2. Nếu xe chưa kết nối WebSocket, gửi bổ trợ qua HTTP REST nội bộ LAN (nếu có IP)
         cmd_lower = command.lower().strip()
         hardware_map = {
             "tiến": ("forward", 0, 85),
@@ -1230,10 +1388,6 @@ async def handle_api_action(request):
                 act, dur, spd = v
                 asyncio.create_task(send_robot_hardware_action(act, dur, spd))
                 break
-
-        if ACTIVE_SESSION is not None:
-            await ACTIVE_SESSION.handle_user_query(command)
-            return web.json_response({"status": "ok", "message": f"Đã gửi lệnh tới robot: {command}"})
 
         return web.json_response({
             "status": "ok", 
@@ -1366,6 +1520,9 @@ async def handle_index(request):
 
             recognition.onerror = (e) => {{
                 console.warn('Lỗi micro:', e);
+                if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {{
+                    alert('Trình duyệt chưa được cấp quyền dùng Micro! Hãy bấm biểu tượng ổ khóa 🔒 cạnh thanh địa chỉ để Cho phép Micro.');
+                }}
                 stopMic();
             }};
 
@@ -1472,6 +1629,7 @@ async def handle_index(request):
 async def preload_voice_cache():
     """Tải trước các câu thoại cử động cơ bản vào RAM để phản hồi 0ms với âm lượng to"""
     common_replies = [
+        "Dạ, em nghe ạ!",
         "Xin chào bạn, mình là Robot trợ lý thông minh, mình sẵn sàng cùng với bạn!",
         "Dạ em tiến lên ngay ạ!",
         "Dạ em lùi lại đây ạ!",
